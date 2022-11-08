@@ -1,0 +1,586 @@
+Cross Matching the Pristine Catalogue to SEGUE
+
+First the prisitine catalogue is read in as an astropy table. Following the formula laid out on 
+https://astroquery.readthedocs.io/en/latest/xmatch/xmatch.html, I used astroquery.xmatch.XMatch as the method of cross 
+matching the two tables.
+
+Attempt 1:
+
+input:
+in_cat = Table.read('/arc/projects/k-pop/pristine/Pristine_CFIS.fits')
+matched_cat = 'vizier:V/139/sdss9'
+separation = 5*u.arcsec
+ra_col_name = 'RA(CaHK)'
+dec_col_name = 'Dec(CaHK)'
+table = XMatch.query(cat1=in_cat, cat2=matched_cat, max_distance=separation, colRA1=ra_col_name, colDec1=dec_col_name)
+
+output:
+ConnectionError: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))
+
+Checked astroquery docs and it seems as tho DR9 of SDSS isn't a part of astroquery. Going with DR8 instead.
+
+Attempt 2:
+*changed variables andd code only*
+matched_cat = 'vizier:II/306/sdss8'
+
+output:
+ConnectionError: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))
+
+Now not sure whats happening or why this isn't working.
+
+Switched to using astroquery.sdss.SDSS and had to transform all the coordinates from the table to astropy.coordinate 
+objects. These were then input into this following code:
+
+input:
+from astroquery.sdss import SDSS
+from astropy import coordinates as coords
+import numpy as np
+positions = coords.SkyCoord(np.array([in_cat['RA(CaHK)'],in_cat['Dec(CaHK)']]).T, unit='deg', frame='icrs')
+xid = SDSS.query_crossid(positions,get_query_payload=True)
+
+No output, would run for a long time and considering set_query_payload was true, it wouldn't even return the results, 
+just what it was asking for. Switched to the follwing code:
+
+input:
+xid = SDSS.query_crossid(positions,timeout=300)
+# Queried at 11:48 am
+
+Where "timeout" is the variable associated with the amount of time it gives for establishing a successful connection with 
+the remote server
+
+output:
+Keyboard interrupt.
+
+Will try for 10 stars:
+
+input:
+xid = SDSS.query_crossid(positions[:10],timeout=300)
+
+output:
+Successful!
+
+Now 100:
+
+output:
+Successful!
+
+Now 1000:
+input:
+xid = SDSS.query_crossid(positions[:1000],timeout=300)
+
+output:
+Table:
+Your_browser_sent_an_invalid_request
+------------------------------------
+                      </body></html>
+                      
+I sense a query size limit. Time to investigate.
+
+Tried for 200 regions and received a different error:
+
+ValueError: Some errors were detected !
+    Line #63 (got 4 columns instead of 1)
+    Line #125 (got 2 columns instead of 1)
+    Line #126 (got 2 columns instead of 1)
+    Line #132 (got 2 columns instead of 1)
+    Line #133 (got 4 columns instead of 1)
+    Line #134 (got 2 columns instead of 1)
+    Line #135 (got 2 columns instead of 1)
+    Line #138 (got 2 columns instead of 1)
+
+Makes me think there's something else going on here. There's a similar issue with cross_id on the astroquery repo as an open 
+thread: https://github.com/astropy/astroquery/issues/2142
+
+New approach: query_region().
+
+input:
+xid = SDSS.query_region(positions[:200],spectro=True)
+
+output:
+/opt/conda/lib/python3.8/site-packages/astroquery/sdss/core.py:862: VisibleDeprecationWarning: Reading unicode strings without specifying the encoding argument is deprecated. Set the encoding, use None for the system default.
+  arr = np.atleast_1d(np.genfromtxt(io.BytesIO(response.content),
+
+print(xid)
+>>> Your_browser_sent_an_invalid_request
+>>> ------------------------------------
+>>>                       </body></html>
+
+Where's the strings??
+
+positions[0].ra.dtype
+positions[1].dec.dtype
+
+both are float64
+
+sends large error for 70 stars:
+---------------------------------------------------------------------------
+ValueError                                Traceback (most recent call last)
+/tmp/ipykernel_312/3876583306.py in <module>
+      3 import numpy as np
+      4 positions = coords.SkyCoord(np.array([in_cat['RA(CaHK)'],in_cat['Dec(CaHK)']]).T, unit='deg', frame='icrs')
+----> 5 xid = SDSS.query_region(positions[:70],spectro=True)
+
+/opt/conda/lib/python3.8/site-packages/astroquery/utils/class_or_instance.py in f(*args, **kwds)
+     23         def f(*args, **kwds):
+     24             if obj is not None:
+---> 25                 return self.fn(obj, *args, **kwds)
+     26             else:
+     27                 return self.fn(cls, *args, **kwds)
+
+/opt/conda/lib/python3.8/site-packages/astroquery/utils/process_asyncs.py in newmethod(self, *args, **kwargs)
+     27             if kwargs.get('get_query_payload') or kwargs.get('field_help'):
+     28                 return response
+---> 29             result = self._parse_result(response, verbose=verbose)
+     30             self.table = result
+     31             return result
+
+/opt/conda/lib/python3.8/site-packages/astroquery/sdss/core.py in _parse_result(self, response, verbose)
+    860         if 'error_message' in io.BytesIO(response.content):
+    861             raise RemoteServiceError(response.content)
+--> 862         arr = np.atleast_1d(np.genfromtxt(io.BytesIO(response.content),
+    863                                           names=True, dtype=None,
+    864                                           delimiter=',', skip_header=1,
+
+/opt/conda/lib/python3.8/site-packages/numpy/lib/npyio.py in genfromtxt(fname, dtype, comments, delimiter, skip_header, skip_footer, converters, missing_values, filling_values, usecols, names, excludelist, deletechars, replace_space, autostrip, case_sensitive, defaultfmt, unpack, usemask, loose, invalid_raise, max_rows, encoding, like)
+   2122             # Raise an exception ?
+   2123             if invalid_raise:
+-> 2124                 raise ValueError(errmsg)
+   2125             # Issue a warning ?
+   2126             else:
+
+ValueError: Some errors were detected !
+    Line #4 (got 3 columns instead of 1)
+    
+But will work for the first 68 stars, no more, as shown below:
+
+input:
+xid = SDSS.query_region(positions[:68],spectro=True)
+print(xid)
+
+output:
+       ra              dec               objid        ...  run2d  instrument
+---------------- ---------------- ------------------- ... ------- ----------
+ 134.87173986461  36.884467572062 1237658191614967922 ...      26       SDSS
+134.860080036418 36.9570837768861 1237658191614967934 ...      26       SDSS
+134.836263491566 36.8664558693697 1237658191614968005 ...      26       SDSS
+  134.6748135702 36.8114350055697 1237658191614902322 ...      26       SDSS
+134.764391609972 36.6585357620014 1237658203957952664 ...      26       SDSS
+ 134.72792084503  36.667953439587 1237658203957952779 ...      26       SDSS
+134.736438407262 36.7327851872292 1237658203958018083 ...      26       SDSS
+134.771755089678 36.7941982240365 1237658203958018281 ...      26       SDSS
+134.862101373351 36.8143241321749 1237658203958018510 ... v5_10_0       BOSS
+134.819890388983 36.8802415601956 1237658191614968003 ... v5_10_0       BOSS
+134.881016243265 36.9197924914313 1237658191614968170 ... v5_10_0       BOSS
+134.877408942597 36.7717534471396 1237658203958018497 ... v5_10_0       BOSS
+
+Debugging in the code to do I guess? unless its a parameter that I'm not selecting I may need to completely change the cross-correlating method that I'm using.
+
+Not sure if theres a way to change this. Maybe SDSS is just not built for such large queries. All arrows point back to xmatch...
+
+There apparently is a 9 in the testfiles on github, will switch back to that one and see what happens.
+
+Worked for 1000 entries, failed for 10000 with the same connection terminated by peer error message.
+
+input:
+table = XMatch.query(cat1=in_cat[:10000], cat2=matched_cat, max_distance=separation, colRA1=ra_col_name, colDec1=dec_col_name)
+
+output:
+ConnectionError: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))
+
+Worked for 5000 entries. Worked for 7500 entries. Worked for 9000 entries, output 9914 matches due to bounds. Worked for 9500 entries. Now it randomly worked for 10000 entries.
+
+New error pops up when querying for 100 000 entries:
+HTTPError: 400 Client Error: Mauvaise Requête for url: http://cdsxmatch.u-strasbg.fr/xmatch/api/v1/sync
+
+Though only saw it twice. Will be switching methods unless email from Séb reveals anything I haven't tried.
+
+Tried downloading the SEGUE data, and using that at catalogue2 in xmatch, was getting this error:
+
+output:
+HTTPError: 400 Client Error: Mauvaise Requête for url: http://cdsxmatch.u-strasbg.fr/xmatch/api/v1/sync
+
+just going to switch back to old method and run a for loop for now? not sure how to fix this and I have to work on other things.
+
+Okay, so I am to use the CANFAR server to do the cross matching rather than the xmatch servers. Will restart the thinking on this.
+
+Going the pandas route:
+
+input:
+pristine = Table.read('/arc/projects/k-pop/pristine/Pristine_CFIS.fits').to_pandas()
+sdss = Table.read('/arc/home/aydanmckay/specObj-dr16.fits')
+names = [name for name in sdss.colnames if len(sdss[name].shape) <= 1]
+sdss = sdss[names].to_pandas()
+
+since without the names thing being performed, this error is outputted:
+ValueError: Cannot convert a table with multidimensional columns to a pandas DataFrame. Offending columns are: ['OBJID', 'TCOLUMN', 'THETA', 'SN_MEDIAN', 'FRACNSIGMA', 'FRACNSIGHI', 'FRACNSIGLO', 'SPECTROFLUX', 'SPECTROFLUX_IVAR', 'SPECTROSYNFLUX', 'SPECTROSYNFLUX_IVAR', 'SPECTROSKYFLUX', 'CALIBFLUX', 'CALIBFLUX_IVAR']
+One can filter out such columns using:
+names = [name for name in tbl.colnames if len(tbl[name].shape) <= 1]
+tbl[names].to_pandas(...)
+
+left inner joining the tables with the left being pristine and right being sdss, joined on PLUG_RA on RA(CaHK) and PLUG_DEC on Dec(CaHK). Returned 0 rows being matched. tried joining on RA(SDSS) and Dec(SDSS), returned 1 row being matched.
+
+Hey! this should work!:
+merged_pristine = pristine.merge_asof(sdss, left_on=['RA(CaHK)', 'Dec(CaHK)'],
+                                      right_on=['PLUG_RA', 'PLUG_DEC'], how='left',direction='backward')
+
+Merges based on closest key value. might try direction='nearest' as well.
+
+need to sort the data, and it seems as tho it might not work for multiple columns. Getting close it feels tho. Thats all before the meeting.
+
+Using stilts, a matched catalogue between stilts and specobjs was made using the folling command:
+stilts tmatchn multimode=pairs nin=2 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS_old.fits suffix1='_pristine' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-specobj-dr16.fits suffix2='_sdss' values2='PLUG_RA PLUG_DEC' \
+fixcols=all join1=always \
+out=matches.fits ofmt=fits
+
+Worked!!! got like 73k matches using the criteria in the notebook.
+
+creating the supercatalogue:
+specobjs using plug ra and dec, not sure about that tbh, don't even know if I should be using (CaHK) ra and dec.
+lamlrs could use ra_obs and dec_obs instead of ra and dec
+same for lammrs
+galah using the only ones avail, ra_dr2 and dec_dr2 apparently
+Lets go:
+stilts tmatchn multimode=pairs nin=7 matcher=sky params=5 \
+> in1=/arc/projects/k-pop/pristine/Pristine_CFIS_old.fits suffix1='_pristine' values1='RA(CaHK) Dec(CaHK)' \
+> in2=/arc/projects/k-pop/catalogues/sdss-specobj-dr16.fits suffix2='_sdss' values2='PLUG_RA PLUG_DEC' \
+> in3=/arc/projects/k-pop/catalogues/lamost-lrs-dr6v2.fits suffix3='_lamlrs' values3='ra dec' \
+> in4=/arc/projects/k-pop/catalogues/lamost-mrs-dr6v2.fits suffix4='_lammrs' values4='ra dec' \
+> in5=/arc/projects/k-pop/catalogues/galah_dr3v2.fits suffix5='_galah' values5='ra_dr2 dec_dr2' \
+> in6=/arc/projects/k-pop/catalogues/sdss-apogee-dr16.fits suffix6='_apogee' values6='RA DEC' \
+> in7=/arc/projects/k-pop/catalogues/sdss-mastar-dr16.fits suffix7='_manga' values7='OBJRA OBJDEC' \
+> fixcols=all join1=always \
+> out=super_catalogue.fits ofmt=fits
+
+Hey it ran baby. lets fire it up in a notebook tomorrow.
+
+Didn't like the fits formating, astropy.table.to_pandas() didn't like it either.
+gonna try just .csv format st itll be a lot quicker just through pandas.
+Input:
+
+stilts tmatchn multimode=pairs nin=7 matcher=sky params=5 \
+> in1=/arc/projects/k-pop/pristine/Pristine_CFIS_old.fits suffix1='_pristine' values1='RA(CaHK) Dec(CaHK)' \
+> in2=/arc/projects/k-pop/catalogues/sdss-specobj-dr16.fits suffix2='_sdss' values2='PLUG_RA PLUG_DEC' \
+> in3=/arc/projects/k-pop/catalogues/lamost-lrs-dr6v2.fits suffix3='_lamlrs' values3='ra dec' \
+> in4=/arc/projects/k-pop/catalogues/lamost-mrs-dr6v2.fits suffix4='_lammrs' values4='ra dec' \
+> in5=/arc/projects/k-pop/catalogues/galah_dr3v2.fits suffix5='_galah' values5='ra_dr2 dec_dr2' \
+> in6=/arc/projects/k-pop/catalogues/sdss-apogee-dr16.fits suffix6='_apogee' values6='RA DEC' \
+> in7=/arc/projects/k-pop/catalogues/sdss-mastar-dr16.fits suffix7='_manga' values7='OBJRA OBJDEC' \
+> fixcols=all join1=always \
+> out=super_catalogue.csv ofmt=csv
+
+Removed a bunch of columns from the dataset to hopefully make it smaller.
+
+stilts tmatchn multimode=pairs nin=2 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS_old.fits suffix1='_pristine' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-specobj-dr16.fits suffix2='_sdss' values2='PLUG_RA PLUG_DEC' \
+
+stilts tmatch2 matcher=sky ifmt1=csv \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.csv suffix1=_p values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-specobj-dr16.fits suffix2=_s values2='PLUG_RA PLUG_DEC' \
+fixcols=all
+out=prisdss.csv ofmt=csv
+
+stilts tmatchn multimode=pairs nin=2 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS_old.fits suffix1='_p' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-specobj-dr16.fits suffix2='_s' values2='PLUG_RA PLUG_DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_p Dec(CaHK)_p CaHK_0_p e_CaHK_p u_0_p g_0_p r_0_p i_0_p z_0_p err_u_p err_g_p err_r_p err_i_p err_z_p PLUG_RA_s PLUG_DEC_s Z_s Z_ERR_s CLASS_s ELODIE_OBJECT_s ELODIE_SPTYPE_s ELODIE_BV_s ELODIE_TEFF_s ELODIE_LOGG_s ELODIE_FEH_s ELODIE_Z_s ELODIE_Z_ERR_s ELODIE_Z_MODELERR_s ELODIE_RCHI2_s ELODIE_DOF_s"' \
+out=prisdsstest.csv ofmt=csv
+
+To do:
+
+Keep from pristine catalogue:
+
+E_BV
+pm_1
+pmra_1
+pmra_error_1
+pmdec_1
+pmdec_error_1
+
+#for the parallax, make sure p1 = p2
+
+parallax_1
+parallax_error_1
+parallax_2
+parallax_error_2
+
+#for the phots, the mags are the important ones
+
+phot_g_mean_flux_1
+phot_g_mean_flux_error_1
+phot_g_mean_mag_1
+phot_bp_mean_flux_1
+phot_bp_mean_flux_error_1
+phot_bp_mean_mag_1
+phot_rp_mean_flux_1
+phot_rp_mean_mag_1
+bp_rp_1
+phot_g_mean_mag_error
+phot_bp_mean_mag_error
+phot_rp_mean_mag_error
+
+# for psfs, make a distribution,  make sure they're around 20 mag.
+
+g_chp_psf
+g_chp_psf_err
+r_chp_psf
+r_chp_psf_err
+i_chp_psf
+i_chp_psf_err
+z_chp_psf
+z_chp_psf_err
+y_chp_psf
+y_chp_psf_err
+
+MAG_AUTO
+MAGERR_AUTO
+dr2_radial_velocity_1
+dr2_radial_velocity_error_1
+dr2_rv_nb_transits_1
+dr2_rv_template_teff_1
+dr2_rv_template_logg_1
+
+New code:
+
+stilts tmatchn multimode=pairs nin=2 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_p' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-sspp-dr16.fits suffix2='_s' values2='RA DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_p Dec(CaHK)_p CaHK_0_p e_CaHK_p E_BV_p pm_1_p pmra_1_p \
+pmra_error_1_p pmdec_1_p pmdec_error_1_p parallax_1_p parallax_error_1_p parallax_2_p \
+parallax_error_2_p phot_g_mean_mag_1_p phot_bp_mean_mag_1_p phot_rp_mean_mag_1_p \
+phot_g_mean_mag_error_p phot_bp_mean_mag_error_p phot_rp_mean_mag_error_p g_chp_psf_p g_chp_psf_err_p \
+r_chp_psf_p r_chp_psf_err_p i_chp_psf_p i_chp_psf_err_p z_chp_psf_p z_chp_psf_err_p y_chp_psf_p \
+y_chp_psf_err_p MAG_AUTO_p MAGERR_AUTO_p MAG_BEST_p MAGERR_BEST_p dr2_radial_velocity_1_p \
+dr2_radial_velocity_error_1_p dr2_rv_nb_transits_1_p dr2_rv_template_teff_1_p dr2_rv_template_logg_1_p \
+RA_s DEC_s TEFF_ADOP_s TEFF_ADOP_UNC_s LOGG_ADOP_s LOGG_ADOP_UNC_s FEH_ADOP_s FEH_ADOP_UNC_s AFE_s \
+AFE_UNC_s RV_ADOP_s RV_ADOP_UNC_s V_MAG_s BV_s G_MAG_s UG_s GR_s RI_s IZ_s U_MAG_UNC_s G_MAG_UNC_s \
+R_MAG_UNC_s I_MAG_UNC_s Z_MAG_UNC_s EBV_s SNR_s PRIM_TARGET_s TEFF_SPEC_s TEFF_SPEC_UNC_s LOGG_SPEC_s \
+LOGG_SPEC_UNC_s FEH_SPEC_s FEH_SPEC_UNC_s TEFF_COL_s TEFF_COL_UNC_s"' \
+out=pris_sdss.csv ofmt=csv
+
+Worked! i think!
+
+sklearn function standard scalling logg
+
+
+
+
+
+
+
+
+
+
+Future Reference *** vaex.io *** for when we perform the full union catalogue
+
+cerating the left joined catalogue for cross matching.
+
+stilts tmatchn multimode=pairs nin=2 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_p' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-specobj-dr16.fits suffix2='_s' values2='PLUG_RA PLUG_DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_p Dec(CaHK)_p CaHK_0_p e_CaHK_p E_BV_p pm_1_p pmra_1_p \
+pmra_error_1_p pmdec_1_p pmdec_error_1_p parallax_1_p parallax_error_1_p parallax_2_p \
+parallax_error_2_p phot_g_mean_mag_1_p phot_bp_mean_mag_1_p phot_rp_mean_mag_1_p \
+phot_g_mean_mag_error_p phot_bp_mean_mag_error_p phot_rp_mean_mag_error_p g_chp_psf_p g_chp_psf_err_p \
+r_chp_psf_p r_chp_psf_err_p i_chp_psf_p i_chp_psf_err_p z_chp_psf_p z_chp_psf_err_p y_chp_psf_p \
+y_chp_psf_err_p MAG_AUTO_p MAGERR_AUTO_p MAG_BEST_p MAGERR_BEST_p dr2_radial_velocity_1_p \
+dr2_radial_velocity_error_1_p dr2_rv_nb_transits_1_p dr2_rv_template_teff_1_p dr2_rv_template_logg_1_p \
+PLUG_RA_s PLUG_DEC_s Z_s Z_ERR_s CLASS_s"' \
+join1=always out=leftjoinpristinespecobj.csv ofmt=csv
+
+attempting to cross match and output a parquet file was unsuccessful. known issue. see link: http://www.star.bris.ac.uk/~mbt/stilts/sun256/outParquet.html
+
+now lets left join the sspp to get metallicity, and apply to unsupervised umap to see if it'll show some more information.
+
+stilts tmatchn multimode=pairs nin=2 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_p' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-sspp-dr16.fits suffix2='_s' values2='RA DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_p Dec(CaHK)_p CaHK_0_p e_CaHK_p E_BV_p pm_1_p pmra_1_p \
+pmra_error_1_p pmdec_1_p pmdec_error_1_p parallax_1_p parallax_error_1_p parallax_2_p \
+parallax_error_2_p phot_g_mean_mag_1_p phot_bp_mean_mag_1_p phot_rp_mean_mag_1_p \
+phot_g_mean_mag_error_p phot_bp_mean_mag_error_p phot_rp_mean_mag_error_p g_chp_psf_p g_chp_psf_err_p \
+r_chp_psf_p r_chp_psf_err_p i_chp_psf_p i_chp_psf_err_p z_chp_psf_p z_chp_psf_err_p y_chp_psf_p \
+y_chp_psf_err_p MAG_AUTO_p MAGERR_AUTO_p MAG_BEST_p MAGERR_BEST_p dr2_radial_velocity_1_p \
+dr2_radial_velocity_error_1_p dr2_rv_nb_transits_1_p dr2_rv_template_teff_1_p dr2_rv_template_logg_1_p \
+RA_s DEC_s TEFF_ADOP_s TEFF_ADOP_UNC_s LOGG_ADOP_s LOGG_ADOP_UNC_s FEH_ADOP_s FEH_ADOP_UNC_s AFE_s \
+AFE_UNC_s RV_ADOP_s RV_ADOP_UNC_s V_MAG_s BV_s G_MAG_s UG_s GR_s RI_s IZ_s U_MAG_UNC_s G_MAG_UNC_s \
+R_MAG_UNC_s I_MAG_UNC_s Z_MAG_UNC_s EBV_s SNR_s PRIM_TARGET_s TEFF_SPEC_s TEFF_SPEC_UNC_s LOGG_SPEC_s \
+LOGG_SPEC_UNC_s FEH_SPEC_s FEH_SPEC_UNC_s TEFF_COL_s TEFF_COL_UNC_s"' \
+join1=always out=leftjoinpristinesspp.csv ofmt=csv
+
+tried completely unsupervised umap of pristine data to see if any large clumps separating the stars, qsos, or galaxies were existant, but this was not the case. all the different realizations of the data are included in the following figures: '/arc/home/aydanmckay/ssppmappedtopristinecoloursafe.png', '/arc/home/aydanmckay/ssppmappedtopristinecoloursfeh.png', '/arc/home/aydanmckay/specobjsmappedtopristinecoloursnounknowns.png', '/arc/home/aydanmckay/specobjsmappedtopristinecolours.png', '/arc/home/aydanmckay/bigdatapristinecolours.png'. The file used to create these images is unsupervised.ipynb. what is actually happening here is that the magnitudes from pristine only are being subtracted from the CaHK_0 magnitude to create colours, and these colours are fed to the umap fitter. The sdss labels of galaxy qso or star are then applied afterwards to see if there is any clumping happening without me telling the algorithm that they are all different celestial objects.
+
+Now trying semisupervised, using the labels I have by left joining the sdss onto pristine in the file semisupervised. look for figures that start with title "semi" the ones that end with qsogal are those which I tried to give QSOs and galaxies the same label different than stars to see if they would be more separated.
+
+LAMOST LRS params im taking:
+RA DEC OBJTYPE MAGTYPE MAG1 MAG2 MAG3 MAG4 MAG5 MAG6 MAG7 CLASS Z Z_ERR SNRU SNRG SNRR SNRI SNRZ:
+
+stilts tmatchn multimode=pairs nin=3 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_p' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-sspp-dr16.fits suffix2='_s' values2='RA DEC' \
+in3=/arc/projects/k-pop/catalogues/lamost-lrs-dr7v2.fits.gz suffix3='_l' values3='ra dec' \
+fixcols=all ocmd='keepcols "RA(CaHK)_p Dec(CaHK)_p CaHK_0_p e_CaHK_p E_BV_p pm_1_p pmra_1_p \
+pmra_error_1_p pmdec_1_p pmdec_error_1_p parallax_1_p parallax_error_1_p parallax_2_p \
+parallax_error_2_p phot_g_mean_mag_1_p phot_bp_mean_mag_1_p phot_rp_mean_mag_1_p \
+phot_g_mean_mag_error_p phot_bp_mean_mag_error_p phot_rp_mean_mag_error_p g_chp_psf_p g_chp_psf_err_p \
+r_chp_psf_p r_chp_psf_err_p i_chp_psf_p i_chp_psf_err_p z_chp_psf_p z_chp_psf_err_p y_chp_psf_p \
+y_chp_psf_err_p MAG_AUTO_p MAGERR_AUTO_p MAG_BEST_p MAGERR_BEST_p dr2_radial_velocity_1_p \
+dr2_radial_velocity_error_1_p dr2_rv_nb_transits_1_p dr2_rv_template_teff_1_p dr2_rv_template_logg_1_p \
+RA_s DEC_s TEFF_ADOP_s TEFF_ADOP_UNC_s LOGG_ADOP_s LOGG_ADOP_UNC_s FEH_ADOP_s FEH_ADOP_UNC_s AFE_s \
+AFE_UNC_s RV_ADOP_s RV_ADOP_UNC_s V_MAG_s BV_s G_MAG_s UG_s GR_s RI_s IZ_s U_MAG_UNC_s G_MAG_UNC_s \
+R_MAG_UNC_s I_MAG_UNC_s Z_MAG_UNC_s EBV_s SNR_s PRIM_TARGET_s TEFF_SPEC_s TEFF_SPEC_UNC_s LOGG_SPEC_s \
+LOGG_SPEC_UNC_s FEH_SPEC_s FEH_SPEC_UNC_s TEFF_COL_s TEFF_COL_UNC_s ra_l dec_l objtype_l magtype_l \
+mag1_l mag2_l mag3_l mag4_l mag5_l mag6_l mag7_l class_l z_l z_err_l snru_l snrg_l snrr_l snri_l snrz_l"' \
+join1=always out=leftjoinpristinesspplamostlrs.csv ofmt=csv
+
+
+went into the file unsupervised and added pmra_1 and pmdec_1 columns to each of the cells and catalogues imported. These plots will be found as the same titles as all these but with pm at the beginning of the filename.
+'/arc/home/aydanmckay/ssppmappedtopristinecoloursafe.png', '/arc/home/aydanmckay/ssppmappedtopristinecoloursfeh.png', '/arc/home/aydanmckay/specobjsmappedtopristinecoloursnounknowns.png', '/arc/home/aydanmckay/specobjsmappedtopristinecolours.png', '/arc/home/aydanmckay/bigdatapristinecolours.png'
+eg; '/arc/home/aydanmckay/pmssppmappedtopristinecoloursafe.png'
+
+cross matching with milliquas:
+
+stilts tmatchn multimode=pairs nin=4 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_p' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-sspp-dr16.fits suffix2='_s' values2='RA DEC' \
+in3=/arc/projects/k-pop/catalogues/lamost-lrs-dr7v2.fits.gz suffix3='_l' values3='ra dec' \
+in4=/arc/projects/k-pop/catalogues/milliquas-7.3b.fits suffix4='_q' values4='RA DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_p Dec(CaHK)_p CaHK_0_p e_CaHK_p E_BV_p pm_1_p pmra_1_p \
+pmra_error_1_p pmdec_1_p pmdec_error_1_p parallax_1_p parallax_error_1_p parallax_2_p \
+parallax_error_2_p phot_g_mean_mag_1_p phot_bp_mean_mag_1_p phot_rp_mean_mag_1_p \
+phot_g_mean_mag_error_p phot_bp_mean_mag_error_p phot_rp_mean_mag_error_p g_chp_psf_p g_chp_psf_err_p \
+r_chp_psf_p r_chp_psf_err_p i_chp_psf_p i_chp_psf_err_p z_chp_psf_p z_chp_psf_err_p y_chp_psf_p \
+y_chp_psf_err_p MAG_AUTO_p MAGERR_AUTO_p MAG_BEST_p MAGERR_BEST_p dr2_radial_velocity_1_p \
+dr2_radial_velocity_error_1_p dr2_rv_nb_transits_1_p dr2_rv_template_teff_1_p dr2_rv_template_logg_1_p \
+RA_s DEC_s TEFF_ADOP_s TEFF_ADOP_UNC_s LOGG_ADOP_s LOGG_ADOP_UNC_s FEH_ADOP_s FEH_ADOP_UNC_s AFE_s \
+AFE_UNC_s RV_ADOP_s RV_ADOP_UNC_s V_MAG_s BV_s G_MAG_s UG_s GR_s RI_s IZ_s U_MAG_UNC_s G_MAG_UNC_s \
+R_MAG_UNC_s I_MAG_UNC_s Z_MAG_UNC_s EBV_s SNR_s PRIM_TARGET_s TEFF_SPEC_s TEFF_SPEC_UNC_s LOGG_SPEC_s \
+LOGG_SPEC_UNC_s FEH_SPEC_s FEH_SPEC_UNC_s TEFF_COL_s TEFF_COL_UNC_s ra_l dec_l objtype_l magtype_l \
+mag1_l mag2_l mag3_l mag4_l mag5_l mag6_l mag7_l class_l z_l z_err_l snru_l snrg_l snrr_l snri_l snrz_l \
+RA_q DEC_q NAME_q"' \
+join1=always out=leftjoinpristinesspplamostlrsmilliquas.csv ofmt=csv
+
+cross matched the wrong one, I need to add it onto the specobjs cross matched one
+
+stilts tmatchn multimode=pairs nin=3 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_p' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-specobj-dr16.fits suffix2='_s' values2='PLUG_RA PLUG_DEC' \
+in3=/arc/projects/k-pop/catalogues/milliquas-7.3b.fits suffix3='_q' values3='RA DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_p Dec(CaHK)_p CaHK_0_p e_CaHK_p E_BV_p pm_1_p pmra_1_p \
+pmra_error_1_p pmdec_1_p pmdec_error_1_p parallax_1_p parallax_error_1_p parallax_2_p \
+parallax_error_2_p phot_g_mean_mag_1_p phot_bp_mean_mag_1_p phot_rp_mean_mag_1_p \
+phot_g_mean_mag_error_p phot_bp_mean_mag_error_p phot_rp_mean_mag_error_p g_chp_psf_p g_chp_psf_err_p \
+r_chp_psf_p r_chp_psf_err_p i_chp_psf_p i_chp_psf_err_p z_chp_psf_p z_chp_psf_err_p y_chp_psf_p \
+y_chp_psf_err_p MAG_AUTO_p MAGERR_AUTO_p MAG_BEST_p MAGERR_BEST_p dr2_radial_velocity_1_p \
+dr2_radial_velocity_error_1_p dr2_rv_nb_transits_1_p dr2_rv_template_teff_1_p dr2_rv_template_logg_1_p \
+PLUG_RA_s PLUG_DEC_s Z_s Z_ERR_s CLASS_s RA_q DEC_q NAME_q QPCT_q"' \
+join1=always out=leftjoinpristinespecobjmilliquas.csv ofmt=csv
+
+figures produced: semipristinecolouredbyspecobjsclassquas.png, semipristinecolouredbyspecobjsclassnounknownsquas.png
+
+messing with hyperparams: semiquasn_epochs100alph10.png, seminounknownsquasn_epochs100alph10.png, semiquasn_epochs100alph10pms.png, seminounknownsquasn_epochs100alph10pms.png
+
+Wanted to predict labels using umap, and then use those labels to make cuts before running the metallicity program, umap doesn't predict labels apparently. See link:
+https://github.com/lmcinnes/umap/issues/781
+
+Adding flags to the data. Seeing if that's what they mean in the paper to do with nominal 'n' stars.
+
+
+stilts tmatchn multimode=pairs nin=4 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_p' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/catalogues/sdss-sspp-dr16.fits suffix2='_s' values2='RA DEC' \
+in3=/arc/projects/k-pop/catalogues/lamost-lrs-dr7v2.fits.gz suffix3='_l' values3='ra dec' \
+in4=/arc/projects/k-pop/catalogues/milliquas-7.3b.fits suffix4='_q' values4='RA DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_p Dec(CaHK)_p CaHK_0_p e_CaHK_p E_BV_p pm_1_p pmra_1_p \
+pmra_error_1_p pmdec_1_p pmdec_error_1_p parallax_1_p parallax_error_1_p parallax_2_p \
+parallax_error_2_p phot_g_mean_mag_1_p phot_bp_mean_mag_1_p phot_rp_mean_mag_1_p \
+phot_g_mean_mag_error_p phot_bp_mean_mag_error_p phot_rp_mean_mag_error_p g_chp_psf_p g_chp_psf_err_p \
+r_chp_psf_p r_chp_psf_err_p i_chp_psf_p i_chp_psf_err_p z_chp_psf_p z_chp_psf_err_p y_chp_psf_p \
+y_chp_psf_err_p MAG_AUTO_p MAGERR_AUTO_p MAG_BEST_p MAGERR_BEST_p dr2_radial_velocity_1_p \
+dr2_radial_velocity_error_1_p dr2_rv_nb_transits_1_p dr2_rv_template_teff_1_p dr2_rv_template_logg_1_p \
+RA_s DEC_s FLAG_s TEFF_ADOP_s TEFF_ADOP_UNC_s LOGG_ADOP_s LOGG_ADOP_UNC_s FEH_ADOP_s FEH_ADOP_UNC_s AFE_s \
+AFE_UNC_s RV_ADOP_s RV_ADOP_UNC_s V_MAG_s BV_s G_MAG_s UG_s GR_s RI_s IZ_s U_MAG_UNC_s G_MAG_UNC_s \
+R_MAG_UNC_s I_MAG_UNC_s Z_MAG_UNC_s EBV_s SNR_s PRIM_TARGET_s TEFF_SPEC_s TEFF_SPEC_UNC_s LOGG_SPEC_s \
+LOGG_SPEC_UNC_s FEH_SPEC_s FEH_SPEC_UNC_s TEFF_COL_s TEFF_COL_UNC_s ra_l dec_l objtype_l magtype_l \
+mag1_l mag2_l mag3_l mag4_l mag5_l mag6_l mag7_l class_l z_l z_err_l snru_l snrg_l snrr_l snri_l snrz_l \
+RA_q DEC_q NAME_q"' \
+join1=always out=leftjoinpristinesspplamostlrsmilliquas.csv ofmt=csv
+
+Do a parametrized umap with tensorflow. create a catalogue with the other pristine catalogue.
+
+The columns of that other pristine catalogue are as follows:
+# CaHK     CaHKerr   Flag   EBV     source_id             RA          DEC        Gmag     BPmag    RPmag    FeHphot_gen   FeHphot_dwarf   FeHphot_giant 
+
+stilts tmatchn multimode=pairs nin=2 matcher=sky params=5 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_c' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/pristine/InternalCatalogue_allGaia_2103_dwg.dat ifmt2=ascii suffix2='_p' values2='RA DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_c Dec(CaHK)_c CaHK_0_c e_CaHK_c E_BV_c pm_1_c pmra_1_c \
+pmra_error_1_c pmdec_1_c pmdec_error_1_c parallax_1_c parallax_error_1_c parallax_2_c \
+parallax_error_2_c phot_g_mean_mag_1_c phot_bp_mean_mag_1_c phot_rp_mean_mag_1_c \
+phot_g_mean_mag_error_c phot_bp_mean_mag_error_c phot_rp_mean_mag_error_c g_chp_psf_c g_chp_psf_err_c \
+r_chp_psf_c r_chp_psf_err_c i_chp_psf_c i_chp_psf_err_c z_chp_psf_c z_chp_psf_err_c y_chp_psf_c \
+y_chp_psf_err_c MAG_AUTO_c MAGERR_AUTO_c MAG_BEST_c MAGERR_BEST_c dr2_radial_velocity_1_c \
+dr2_radial_velocity_error_1_c dr2_rv_nb_transits_1_c dr2_rv_template_teff_1_c dr2_rv_template_logg_1_c \
+*_p"' join1=always out=pristineonpristine.csv ofmt=csv
+
+stilts tmatchn multimode=pairs nin=2 matcher=exact \
+in1=/arc/projects/k-pop/pristine/InternalCatalogue_allGaia_2103_dwg.dat ifmt1=ascii suffix1='_p' values1='source_id' \
+in2=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix2='_c' values2='source_id_1' \
+fixcols=all ocmd='keepcols "*_p RA(CaHK)_c Dec(CaHK)_c CaHK_0_c e_CaHK_c E_BV_c source_id_1_c pm_1_c pmra_1_c \
+pmra_error_1_c pmdec_1_c pmdec_error_1_c parallax_1_c parallax_error_1_c parallax_2_c \
+parallax_error_2_c phot_g_mean_mag_1_c phot_bp_mean_mag_1_c phot_rp_mean_mag_1_c \
+phot_g_mean_mag_error_c phot_bp_mean_mag_error_c phot_rp_mean_mag_error_c g_chp_psf_c g_chp_psf_err_c \
+r_chp_psf_c r_chp_psf_err_c i_chp_psf_c i_chp_psf_err_c z_chp_psf_c z_chp_psf_err_c y_chp_psf_c \
+y_chp_psf_err_c MAG_AUTO_c MAGERR_AUTO_c MAG_BEST_c MAGERR_BEST_c dr2_radial_velocity_1_c \
+dr2_radial_velocity_error_1_c dr2_rv_nb_transits_1_c dr2_rv_template_teff_1_c dr2_rv_template_logg_1_c"' \
+join1=always out=p_xp_1_exact.csv ofmt=csv
+
+stilts tmatchn multimode=pairs nin=2 matcher=exact \
+in1=/arc/projects/k-pop/pristine/InternalCatalogue_allGaia_2103_dwg.dat ifmt1=ascii suffix1='_p' values1='source_id' \
+in2=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix2='_c' values2='source_id_1' \
+fixcols=all ocmd='keepcols "*_p RA(CaHK)_c Dec(CaHK)_c CaHK_0_c e_CaHK_c E_BV_c source_id_1_c pm_1_c pmra_1_c \
+pmra_error_1_c pmdec_1_c pmdec_error_1_c parallax_1_c parallax_error_1_c parallax_2_c \
+parallax_error_2_c phot_g_mean_mag_1_c phot_bp_mean_mag_1_c phot_rp_mean_mag_1_c \
+phot_g_mean_mag_error_c phot_bp_mean_mag_error_c phot_rp_mean_mag_error_c g_chp_psf_c g_chp_psf_err_c \
+r_chp_psf_c r_chp_psf_err_c i_chp_psf_c i_chp_psf_err_c z_chp_psf_c z_chp_psf_err_c y_chp_psf_c \
+y_chp_psf_err_c MAG_AUTO_c MAGERR_AUTO_c MAG_BEST_c MAGERR_BEST_c dr2_radial_velocity_1_c \
+dr2_radial_velocity_error_1_c dr2_rv_nb_transits_1_c dr2_rv_template_teff_1_c dr2_rv_template_logg_1_c"' \
+join2=always out=xp_p_2_exact.csv ofmt=csv
+
+stilts tmatchn multimode=pairs nin=2 matcher=sky params=1 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_c' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/pristine/InternalCatalogue_allGaia_2103_dwg.dat ifmt2=ascii suffix2='_p' values2='RA DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_c Dec(CaHK)_c CaHK_0_c e_CaHK_c E_BV_c pm_1_c pmra_1_c \
+pmra_error_1_c pmdec_1_c pmdec_error_1_c parallax_1_c parallax_error_1_c parallax_2_c \
+parallax_error_2_c phot_g_mean_mag_1_c phot_bp_mean_mag_1_c phot_rp_mean_mag_1_c \
+phot_g_mean_mag_error_c phot_bp_mean_mag_error_c phot_rp_mean_mag_error_c g_chp_psf_c g_chp_psf_err_c \
+r_chp_psf_c r_chp_psf_err_c i_chp_psf_c i_chp_psf_err_c z_chp_psf_c z_chp_psf_err_c y_chp_psf_c \
+y_chp_psf_err_c MAG_AUTO_c MAGERR_AUTO_c MAG_BEST_c MAGERR_BEST_c dr2_radial_velocity_1_c \
+dr2_radial_velocity_error_1_c dr2_rv_nb_transits_1_c dr2_rv_template_teff_1_c dr2_rv_template_logg_1_c \
+*_p"' join1=always out=p_xp_1_asec.csv ofmt=csv
+
+stilts tmatchn multimode=pairs nin=2 matcher=sky params=1 \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_c' values1='RA(CaHK) Dec(CaHK)' \
+in2=/arc/projects/k-pop/pristine/InternalCatalogue_allGaia_2103_dwg.dat ifmt2=ascii suffix2='_p' values2='RA DEC' \
+fixcols=all ocmd='keepcols "RA(CaHK)_c Dec(CaHK)_c CaHK_0_c e_CaHK_c E_BV_c pm_1_c pmra_1_c \
+pmra_error_1_c pmdec_1_c pmdec_error_1_c parallax_1_c parallax_error_1_c parallax_2_c \
+parallax_error_2_c phot_g_mean_mag_1_c phot_bp_mean_mag_1_c phot_rp_mean_mag_1_c \
+phot_g_mean_mag_error_c phot_bp_mean_mag_error_c phot_rp_mean_mag_error_c g_chp_psf_c g_chp_psf_err_c \
+r_chp_psf_c r_chp_psf_err_c i_chp_psf_c i_chp_psf_err_c z_chp_psf_c z_chp_psf_err_c y_chp_psf_c \
+y_chp_psf_err_c MAG_AUTO_c MAGERR_AUTO_c MAG_BEST_c MAGERR_BEST_c dr2_radial_velocity_1_c \
+dr2_radial_velocity_error_1_c dr2_rv_nb_transits_1_c dr2_rv_template_teff_1_c dr2_rv_template_logg_1_c \
+*_p"' join2=always out=xp_p_2_asec.csv ofmt=csv
+
+stilts tmatchn multimode=pairs nin=2 matcher=exact \
+in1=/arc/projects/k-pop/pristine/Pristine_CFIS.fits.gz suffix1='_c' values1='source_id_1' \
+in2=/arc/projects/k-pop/pristine/InternalCatalogue_allGaia_2103_dwg.dat ifmt2=ascii suffix2='_p' values2='source_id' \
+fixcols=all ocmd='keepcols "*_p RA(CaHK)_c Dec(CaHK)_c CaHK_0_c e_CaHK_c E_BV_c source_id_1_c pm_1_c pmra_1_c \
+pmra_error_1_c pmdec_1_c pmdec_error_1_c parallax_1_c parallax_error_1_c parallax_2_c \
+parallax_error_2_c phot_g_mean_mag_1_c phot_bp_mean_mag_1_c phot_rp_mean_mag_1_c \
+phot_g_mean_mag_error_c phot_bp_mean_mag_error_c phot_rp_mean_mag_error_c g_chp_psf_c g_chp_psf_err_c \
+r_chp_psf_c r_chp_psf_err_c i_chp_psf_c i_chp_psf_err_c z_chp_psf_c z_chp_psf_err_c y_chp_psf_c \
+y_chp_psf_err_c MAG_AUTO_c MAGERR_AUTO_c MAG_BEST_c MAGERR_BEST_c dr2_radial_velocity_1_c \
+dr2_radial_velocity_error_1_c dr2_rv_nb_transits_1_c dr2_rv_template_teff_1_c dr2_rv_template_logg_1_c"' \
+join1=always out=xp_p_3_exact.csv ofmt=csv
